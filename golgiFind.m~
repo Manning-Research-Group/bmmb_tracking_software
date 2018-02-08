@@ -1,0 +1,296 @@
+efunction [xyzs_idG, Movie, MovieO, clusterCell, filename, avg_sep, min_area, maxD] = golgiFind(filename,imadj)
+%This function takes in a .tif file and several paramters to track Golgi
+%throughout a movie. 
+%Please read the README.txt file found in the folder for this function
+%first.
+%INPUT PARAMETERS:
+% filename -> name of a .tif file
+%   ex. 'MyMovie.tif' (include the single quotation marks)
+% avg_sep -> average separation (in pixels) between Golgi in the film
+% min_area -> minimum size (in pixels) for a candidate to be considered 
+% a solitary golgi 
+%OUTPUT:
+% xyzs_id: a list of all the centers of mass for all the Golgie in each
+% frame with other information (see README.txt)
+%OTHER NEEDED MATLAB FILES
+% please add to your Matlab path the folder 'aux_functions' which contains
+% necessary Matlab files for this program
+
+% Several parameters are initialized and the movie is read in to Matlab.
+% The scaled intensity is also calculated. 
+%maxdisp = 20;
+
+prompt = {'Separation between fragments (pixels)','Minimum area (pixels^2)','Max displacement (pixels)','Average distance between golgi and nucleus (pixels)','Plot toggle'};
+dlg_title = 'Tracking Parameters';
+num_lines = 1;
+def = {'10','200','20','15','0'};
+answer = inputdlg(prompt,dlg_title,num_lines,def);
+
+avg_sep = str2num(answer{1});
+min_area = str2num(answer{2});
+maxdisp = str2num(answer{3});
+maxD = str2num(answer{4});
+plot_toggle = str2num(answer{5});
+close all
+disp(datestr(now))
+disp('importing movie...')
+tiffInfo = imfinfo(filename);
+no_frame = numel(tiffInfo);
+Movie = cell(no_frame,1);
+tmax = length(Movie);
+intensity = zeros(no_frame,1);
+for iFrame = 1:no_frame
+    Movie{iFrame} = uint16(imread(filename,'Index',iFrame,'Info',tiffInfo));
+    intensity(iFrame) = sum(Movie{iFrame}(:))/numel(Movie{iFrame});
+end
+MovieO = Movie;
+
+disp('Tracking golgi...')
+clusterCell = cell(tmax,1);
+for i = 1:tmax
+        thresh = imadj(i,1);
+        bw = im2bw(MovieO{i},thresh);
+        %bw = 1 - bw;
+        [y, x] = find(bw);
+        %c = clusterdata_subset(x,y,0);
+        c = clusterdata([x,y],0.1);
+        %c = clusterdata([x y],'criterion','distance','cutoff',5);
+        [a, b] = hist(c,unique(c));
+        f = b(a>5);
+        clusters = cell(length(f),1);
+        for l = 1:length(f)
+            clusters{l} = [x(c == f(l)) y(c == f(l))];
+        end
+        clusterCell{i} = clusters;
+        for j = 1:length(clusterCell{i})
+            clusNum = ones(size(clusterCell{i}{j},1),1).*j;
+            frameNum = ones(size(clusterCell{i}{j},1),1).*i;
+            clusterCell{i}{j} = [clusterCell{i}{j} clusNum frameNum];
+        end
+        disp(['Clustering ' num2str(i*100/tmax) '% done'])
+end
+clusterCellBackup = clusterCell;
+
+%%
+%post-processing combining small clusters based on avg_sep and min_area
+clusterCell = clusterCellBackup;
+disp('Combining golgi cluster fragments.')
+pp_tog = 1;
+if pp_tog == 1
+RMA = 10;
+for i = 1:tmax
+    Sfinal = [];
+    try
+        n1 = 0;
+        CN = 0;
+        check = 0;
+        D = clusterCell{i};
+        [~, Index] = sort(cellfun('size', D, 1), 'descend');
+        S = D(Index);
+        for k = 1:size(S,1)
+            if size(S{k},1) < RMA
+                disp([num2str(k) ' too small'])
+                S{k} = [];
+            end
+        end
+        S = S(~cellfun('isempty',S));
+        while check == 0
+            CN = CN + 1;
+            check2 = 0;
+            while check2 == 0
+                %disp(['frame ' num2str(i) ' cluster ' num2str(CN) ' iteration ' num2str(n1)])
+                n1 = n1 + 1;
+                K = cell(length(S),1);
+                for ii = 1:length(S)
+                    try
+                        K{ii} = convhull(S{ii}(:,1),S{ii}(:,2));
+                        K{ii} = [K{ii} ii*ones(length(K{ii}),1)];
+                    catch err
+                        disp(['error in convex hull: ' err])
+                        S{ii,:} = [];
+                    end
+                end
+                K = K(~cellfun('isempty',K));
+                C = cell2mat(K);
+                CHmat = [1 1 1];
+                for j = 1:length(S);
+                    if isempty(S{j}) == 0
+                        CHmat = insertrows(CHmat,[S{j}(C(C(:,2) == j,1),1) S{j}(C(C(:,2) == j,1),2) j*ones(length(C(C(:,2)==j)),1)]);
+                    end
+                end
+                CHmat(1,:) = [];
+                D = pdist(CHmat(:,[1 2]));
+                MinD = D;
+                MinD(MinD > avg_sep) = 0;
+                MinD = squareform(MinD);
+                [row, col] = find(MinD);
+                ind = [row col];
+                numCH = length(CHmat(CHmat(:,3) == 1));
+                Cand = CHmat(ind(ind(:,1) < numCH + 1, 2), 3);
+                Cand = unique(Cand);
+                Cand = Cand(Cand ~= 1);
+                check1 = 0;
+                if isempty(Cand) == 0
+                    for jj = 1:length(Cand)
+                        if size(S{Cand(jj)},1) < min_area && isempty(S{Cand(jj)}) == 0
+                            S{1} = insertrows(S{1}, S{Cand(jj)});
+                            S{Cand(jj)} = [];
+                            check1 = check1 + 1;
+                        end
+                    end
+                else
+                    check1 = 0;
+                end
+                if length(Cand) == 1
+                    check1 = 0;
+                end
+                S = S(~cellfun('isempty',S));
+                if check1 == 0
+                    check2 = 1;
+                end
+                
+            end
+            Sfinal{CN} = S{1}; %#ok<*AGROW>
+            S{1} = [];
+            S = S(~cellfun('isempty',S));
+            if isempty(S) == 1
+                check = 1;
+            end
+        end
+
+        Sfinal = Sfinal(~cellfun('isempty',Sfinal));
+        clusterCell{i} = Sfinal;
+        disp(['post-processing ' num2str(i*100/tmax) '% done '])
+    catch err
+        disp(['error post-processing frame ' num2str(i) ':'])
+        disp(err)
+    end
+end
+
+
+for i = 1:length(clusterCell)
+    for j = 1:length(clusterCell{i})
+        if length(clusterCell{i}{j}) < RMA
+            clusterCell{i}{j} = [];
+        end
+    end
+    clusterCell{i} = clusterCell{i}(~cellfun('isempty',clusterCell{i}));
+end
+clusterCell = clusterCell(~cellfun('isempty',clusterCell));
+end
+
+
+%values for the final clusters are calculated 
+%(center of mass, dispersion, etc.)
+cOutput = cell(length(Movie),1);
+eigvec = cell(length(Movie),1);
+for i = 1:length(clusterCell)
+    for j = 1:length(clusterCell{i})
+        if isempty(clusterCell{i}) == 0 && isempty(clusterCell{i}{j}) == 0
+            cOutput{i}(j,1) = sum(clusterCell{i}{j}(:,1))/(size(clusterCell{i}{j},1));
+            cOutput{i}(j,2) = sum(clusterCell{i}{j}(:,2))/(size(clusterCell{i}{j},1));
+            COM = [cOutput{i}(j,1) cOutput{i}(j,2)];
+            mat = [clusterCell{i}{j}(:,1) clusterCell{i}{j}(:,2)];
+            [DSP D ang a b VV] = inertia(mat, COM);
+            eigvec{i} = VV;
+            cOutput{i}(j,3) = a;
+            cOutput{i}(j,4) = b;
+            cOutput{i}(j,5) = ang;
+            cOutput{i}(j,6) = D(1,1);
+            cOutput{i}(j,7) = D(2,2);
+            cOutput{i}(j,8) = size(clusterCell{i}{j},1);
+            cOutput{i}(j,9) = DSP;
+            cOutput{i}(j,10) = j;
+            cOutput{i}(j,11) = i;
+        end
+    end
+end
+
+%construct matrix for input into tracking code
+cOutput_mat = zeros(1,size(cOutput{1},2));
+for i = 1:length(cOutput)
+    cOutput_mat = insertrows(cOutput_mat, cOutput{i});
+end
+cOutput_mat(1,:) = [];
+
+
+%run tracking code
+disp('linking between frames...')
+dim = 2;
+goodenough = 1;
+memory = 3;
+[xyzs_idG] = trackmem_new(cOutput_mat,maxdisp,dim,goodenough,memory);
+%%
+if plot_toggle == 1
+    filename = full_nameG;
+    tiffInfo = imfinfo(filename);
+no_frame = numel(tiffInfo);
+Movie = cell(no_frame,1);
+tmax = length(Movie);
+intensity = zeros(no_frame,1);
+for iFrame = 1:no_frame
+    Movie{iFrame} = uint16(imread(filename,'Index',iFrame,'Info',tiffInfo));
+end
+
+col = size(xyzs_idG,2);
+M(length(Movie)) = struct('cdata',[],'colormap',[]);
+clr = jet(numel(unique(xyzs_idG(:,col))));
+figure
+pause(3);
+frame_h = get(handle(gcf),'JavaFrame');
+set(frame_h,'Maximized',1);
+pause(3);
+for i = 1:size(clusterCell,1)
+    xyzs_temp = xyzs_idG(xyzs_idG(:,col-1) == i, :);
+    xyzs_temp = sortrows(xyzs_temp, col-2);
+    hold on
+    axis([0,size(Movie{1},2),0,size(Movie{1},1)])
+    if size(imadj,1) > 1
+        im = imagesc(imadjust(Movie{i},imadj(i,:)));
+    end
+    if size(imadj,1) == 1
+        im = imagesc(imadjust(Movie{i},imadj));
+    end
+    colormap(gray);
+    %set(im, 'AlphaData', 0.5);
+    title(['Frame ' num2str(i) ' number of clusters ' num2str(length(clusterCell{i}))]);
+    for  jj = 1:length(clusterCell{i})
+        disp(['plotting frame ' num2str(i) ' cluster ' num2str(jj)])
+        cmap = zeros(size(clusterCell{i}{jj},1),1);
+        cmap(:,1) = clr(xyzs_temp(xyzs_temp(:,col-2) == jj,col),1);
+        cmap(:,2) = clr(xyzs_temp(xyzs_temp(:,col-2) == jj,col),2);
+        cmap(:,3) = clr(xyzs_temp(xyzs_temp(:,col-2) == jj,col),3);
+        scatter(clusterCell{i}{jj}(:,1), clusterCell{i}{jj}(:,2), 1, cmap);
+        text(xyzs_temp(jj,1) + 20, xyzs_temp(jj, 2), num2str(xyzs_temp(xyzs_temp(:,col-2) == jj,col)), 'color', 'r');
+    end
+    M(i) = getframe;
+    clf;
+end
+%movie2avi(M,'golgi.avi','FPS',3)
+end    
+%save([filename(1:length(filename)-4) '_avg_sep' num2str(avg_sep) 'min_area' num2str(min_area) 'maxdisp' num2str(maxdisp) '.mat'],'-v4')
+%disp(datestr(now))
+%quick_golgi_movie
+%close all
+%DSP is measure of dispersion, D is eigenvalue matrix, ang is angle of
+%semimajor axis with x-axis, a is semimajor axis length, b is semiminor
+%axis length
+%%
+    function [DSP D ang a b VV] = inertia(mat, COM)
+        %assuming mass of each pixel = 1
+        xx = mat(:,1) - COM(1);
+        yy = mat(:,2) - COM(2);
+        Ixx = sum(yy.^2);
+        Iyy = sum(xx.^2);
+        Izz = sum(xx.^2 + yy.^2);
+        Ixy = sum(xx.*yy);
+        Itot = [Ixx Ixy
+            Ixy Iyy];
+        [VV, D] = eig(Itot);
+        DSP = Izz/numel(xx);
+        xh = [1 0];
+        ang = acos(xh*VV(:,1));
+        a = sqrt(D(1,1)/numel(xx));
+        b = sqrt(D(2,2)/numel(xx));
+    end
+end
